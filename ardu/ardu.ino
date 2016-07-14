@@ -1,28 +1,95 @@
 #include <avr/io.h>
 #include <avr/interrupt.h>
 
-#define DETECT 2  //zero cross detect
-#define PULSE 4   //trigger pulse width (counts)
-int i=483;
-int GATE;
-int incomingByte;
-int counter = 0;
+// zero cross detect*
+#define DETECT 2
 
-void setup(){
+// trigger pulse width (counts)
+#define PULSE 4
 
-  Serial.begin(921600);
+// Defines the FSM state to ~wating for a command~
+#define WAITING 0
 
+// Defines the FSM state to ~waiting for payload~,
+// which given what we are actually doing here, only
+// means that the next byte should be a byte defining
+// all lights state.
+#define WAITING_PAYLOAD 1
+
+// Identify command, called from our raspberry to
+// make sure it is actually communicating with
+// the raspberry (who knows, right?)
+#define COMMAND_IDENTIFY 0x20
+
+// ~get~ command. Returns the lightsState through
+// serial to the raspberry. Useful if eventually
+// we need a syncing mechanism.
+#define COMMAND_GET 0x21
+
+// ~set~ command. Sets the light state.
+#define COMMAND_SET 0x22
+
+// Reset command. Actually only resets the lightsState to zero.
+// Useful if we need to perform any other operation upon reset
+// without actually resetting the board. .-.
+#define COMMAND_RESET 0x23
+
+int lightsState = 0;
+int state = WAITING;
+
+void updatePinState(int gate, int offset, bool negate) {
+  digitalWrite(gate, (lightsState & offset) == offset && !negate ? HIGH : LOW);
+}
+
+// Called by other methods whenever the lights state should be updated.
+void updateLightsState(bool negate) {
+  // TODO: Read lightsState, and update accordingly.
+  // maybe using updatePinState to perform the bitwise
+  // comparation and do the triac magic right after?
+  updatePinState(3, 0x1, negate);
+  updatePinState(4, 0x2, negate);
+  updatePinState(5, 0x4, negate);
+  updatePinState(6, 0x8, negate);
+  updatePinState(7, 0x10, negate);
+  updatePinState(8, 0x20, negate);
+  updatePinState(9, 0x40, negate);
+  updatePinState(10, 0x80, negate);
+  attachInterrupt(0, zeroCrossingInterrupt, RISING);
+}
+
+
+//////////////////////////////////////////////////////////////////////////
+// Other things.
+
+void processCommand(int incomingByte) {
+  switch (incomingByte) {
+    case COMMAND_IDENTIFY:
+      Serial.print("A");
+      state = WAITING;
+      break;
+    case COMMAND_GET:
+      Serial.write(lightsState);
+      state = WAITING;
+      break;
+    case COMMAND_RESET:
+      lightsState = 0;
+      updateLightsState(false);
+      state = WAITING;
+      break;
+    case COMMAND_SET:
+      state = WAITING_PAYLOAD;
+      break;
+  }
+}
+
+void setup() {
+  Serial.begin(9600);
+  for(int i = 3; i < 11; i++) {
+    pinMode(i, OUTPUT);
+  }
   // set up pins
   pinMode(DETECT, INPUT);     //zero cross detect
   digitalWrite(DETECT, HIGH); //enable pull-up resistor
-  pinMode(4, OUTPUT);      //triac gate control
-  pinMode(5, OUTPUT);      //triac gate control
-  pinMode(6, OUTPUT);      //triac gate control
-  pinMode(7, OUTPUT);      //triac gate control
-  pinMode(9, OUTPUT);      //triac gate control
-  pinMode(10, OUTPUT);      //triac gate control
-  pinMode(11, OUTPUT);      //triac gate control
-  pinMode(12, OUTPUT);      //triac gate control
 
   // set up Timer1
   //(see ATMEGA 328 data sheet pg 134 for more details)
@@ -30,13 +97,8 @@ void setup(){
   TIMSK1 = 0x03;    //enable comparator A and overflow interrupts
   TCCR1A = 0x00;    //timer control registers set for
   TCCR1B = 0x00;    //normal operation, timer disabled
-
-
-  // set up zero crossing interrupt
-    //IRQ0 is pin 2. Call zeroCrossingInterrupt
-    //on rising signal
-
 }
+
 
 //Interrupt Service Routines
 
@@ -46,116 +108,29 @@ void zeroCrossingInterrupt(){ //zero cross detect
 }
 
 ISR(TIMER1_COMPA_vect){ //comparator match
-  digitalWrite(GATE,HIGH);  //set triac gate to high
+  updateLightsState(false);
   TCNT1 = 65536-PULSE;      //trigger pulse width
 }
 
 ISR(TIMER1_OVF_vect){ //timer1 overflow
-  digitalWrite(GATE,LOW); //turn off triac gate
+  updateLightsState(true);
   TCCR1B = 0x00;          //disable timer stopd unintended triggers
 }
 
-void animation (int index) {
-  GATE = index;
-  delay(100);
-  attachInterrupt(0, zeroCrossingInterrupt, RISING);
-  i=483;
-  for(int j = 483; j > 100; j--){
-    OCR1A = j;
-    delay(5);
-  }
-  for(int i = 100; i < 483; i++){
-    OCR1A = i;
-    delay(5);
-  }
-}
-
-void loop(){
-  if (Serial.available() > 0) {
-    incomingByte = Serial.read();
-    counter = incomingByte;
-    if(incomingByte == '1'){
-      digitalWrite(5,LOW);  //set triac gate to high
-      digitalWrite(6,LOW);  //set triac gate to high
-      digitalWrite(7,LOW);  //set triac gate to high
-      digitalWrite(9,LOW);  //set triac gate to high
-      digitalWrite(10,LOW);  //set triac gate to high
-      digitalWrite(11,LOW);  //set triac gate to high
-      digitalWrite(12,LOW);  //set triac gate to high
-      animation(4);
+void loop() {
+  if(Serial.available() > 0) {
+    int incomingByte = Serial.read();
+    switch (state) {
+      case WAITING:
+        processCommand(incomingByte);
+        break;
+      case WAITING_PAYLOAD:
+        lightsState = incomingByte;
+        updateLightsState(false);
+        state = WAITING;
+        break;
+      default:
+        break;
     }
-    if(incomingByte == '2'){
-      digitalWrite(4,LOW);  //set triac gate to high
-      digitalWrite(6,LOW);  //set triac gate to high
-      digitalWrite(7,LOW);  //set triac gate to high
-      digitalWrite(9,LOW);  //set triac gate to high
-      digitalWrite(10,LOW);  //set triac gate to high
-      digitalWrite(11,LOW);  //set triac gate to high
-      digitalWrite(12,LOW);  //set triac gate to high
-      animation(5);
-    }
-    if(incomingByte == '3'){
-      digitalWrite(4,LOW);  //set triac gate to high
-      digitalWrite(5,LOW);  //set triac gate to high
-      digitalWrite(7,LOW);  //set triac gate to high
-      digitalWrite(9,LOW);  //set triac gate to high
-      digitalWrite(10,LOW);  //set triac gate to high
-      digitalWrite(11,LOW);  //set triac gate to high
-      digitalWrite(12,LOW);  //set triac gate to high
-        animation(6);
-    }
-    if(incomingByte == '4'){
-      digitalWrite(4,LOW);  //set triac gate to high
-      digitalWrite(5,LOW);  //set triac gate to high
-      digitalWrite(6,LOW);  //set triac gate to high
-      digitalWrite(9,LOW);  //set triac gate to high
-      digitalWrite(10,LOW);  //set triac gate to high
-      digitalWrite(11,LOW);  //set triac gate to high
-      digitalWrite(12,LOW);  //set triac gate to high
-        animation(7);
-    }
-    if(incomingByte == '8'){
-      digitalWrite(4,LOW);  //set triac gate to high
-      digitalWrite(5,LOW);  //set triac gate to high
-      digitalWrite(6,LOW);  //set triac gate to high
-      digitalWrite(7,LOW);  //set triac gate to high
-      digitalWrite(10,LOW);  //set triac gate to high
-      digitalWrite(11,LOW);  //set triac gate to high
-      digitalWrite(12,LOW);  //set triac gate to high
-        animation(9);
-    }
-    if(incomingByte == '7'){
-      digitalWrite(4,LOW);  //set triac gate to high
-      digitalWrite(5,LOW);  //set triac gate to high
-      digitalWrite(6,LOW);  //set triac gate to high
-      digitalWrite(7,LOW);  //set triac gate to high
-      digitalWrite(9,LOW);  //set triac gate to high
-      digitalWrite(11,LOW);  //set triac gate to high
-      digitalWrite(12,LOW);  //set triac gate to high
-        animation(10);
-    }
-    if(incomingByte == '6'){
-      digitalWrite(4,LOW);  //set triac gate to high
-      digitalWrite(5,LOW);  //set triac gate to high
-      digitalWrite(6,LOW);  //set triac gate to high
-      digitalWrite(7,LOW);  //set triac gate to high
-      digitalWrite(9,LOW);  //set triac gate to high
-      digitalWrite(10,LOW);  //set triac gate to high
-      digitalWrite(12,LOW);  //set triac gate to high
-        animation(11);
-    }
-    if(incomingByte == '5'){
-      digitalWrite(4,LOW);  //set triac gate to high
-      digitalWrite(5,LOW);  //set triac gate to high
-      digitalWrite(6,LOW);  //set triac gate to high
-      digitalWrite(7,LOW);  //set triac gate to high
-      digitalWrite(9,LOW);  //set triac gate to high
-      digitalWrite(10,LOW);  //set triac gate to high
-      digitalWrite(11,LOW);  //set triac gate to high
-        animation(12);
-    }
-  }
-  if(counter == 0 || incomingByte == 'A'){
-    Serial.println("arduino");
   }
 }
